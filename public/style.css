@@ -1,0 +1,26 @@
+/* The Archive (UI Version 2) Styles */
+body {
+    font-family: 'Plus Jakarta Sans', sans-serif;
+}
+
+.glass-panel {
+    background: rgba(251, 249, 245, 0.7);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+}
+
+/* Scrollbar styling for a premium feel */
+::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+::-webkit-scrollbar-thumb {
+    background: #d1c4b8;
+    border-radius: 10px;
+}
+::-webkit-scrollbar-thumb:hover {
+    background: #80756b;
+}
