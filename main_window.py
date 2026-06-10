@@ -487,6 +487,105 @@ class CenteredComboPaintFilter(QObject):
             painter.restore()
 
 
+class TaskComboPopup(QFrame):
+    def __init__(self, combo: QComboBox, parent: QWidget | None = None) -> None:
+        super().__init__(parent, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        self.combo = combo
+        self.setObjectName("taskComboPopup")
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.setFixedWidth(combo.width())
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(
+            TASK_PRIORITY_POPUP_MARGIN,
+            TASK_PRIORITY_POPUP_MARGIN,
+            TASK_PRIORITY_POPUP_MARGIN,
+            TASK_PRIORITY_POPUP_MARGIN,
+        )
+        layout.setSpacing(0)
+
+        for index in range(combo.count()):
+            option = QPushButton(combo.itemText(index))
+            option.setObjectName("taskComboPopupOption")
+            option.setProperty("active", index == combo.currentIndex())
+            icon = combo.itemIcon(index)
+            if not icon.isNull():
+                option.setIcon(icon)
+                option.setIconSize(icon_size(14))
+            option.setFixedHeight(TASK_PRIORITY_POPUP_ROW_HEIGHT)
+            option.setCursor(Qt.CursorShape.PointingHandCursor)
+            option.clicked.connect(lambda checked=False, row=index: self.select_index(row))
+            layout.addWidget(option)
+
+    def select_index(self, index: int) -> None:
+        self.combo.setCurrentIndex(index)
+        self.close()
+
+    def paintEvent(self, event: Any) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        path = QPainterPath()
+        path.addRoundedRect(rect, 8, 8)
+        painter.fillPath(path, QColor("#fbf9f5"))
+        painter.setPen(QColor("#d1c4b8"))
+        painter.drawPath(path)
+        painter.end()
+
+
+class TaskComboPopupController(QObject):
+    def __init__(self, combo: QComboBox) -> None:
+        super().__init__(combo)
+        self.combo = combo
+        self.popup: TaskComboPopup | None = None
+
+    def eventFilter(self, watched: QObject | None, event: QEvent | None) -> bool:
+        if watched is self.combo and event is not None and self.combo.isEnabled():
+            event_type = event.type()
+            if event_type in {
+                QEvent.Type.MouseButtonPress,
+                QEvent.Type.MouseButtonDblClick,
+            } and event.button() == Qt.MouseButton.LeftButton:
+                self.show_popup()
+                return True
+            if event_type == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+                return True
+            if event_type == QEvent.Type.KeyPress and event.key() in {
+                Qt.Key.Key_Down,
+                Qt.Key.Key_Enter,
+                Qt.Key.Key_Return,
+                Qt.Key.Key_Space,
+            }:
+                self.show_popup()
+                return True
+        return super().eventFilter(watched, event)
+
+    def show_popup(self) -> None:
+        if self.popup is not None:
+            self.popup.close()
+
+        popup = TaskComboPopup(self.combo, self.combo)
+        self.popup = popup
+        popup.destroyed.connect(lambda: setattr(self, "popup", None))
+        popup.adjustSize()
+
+        position = self.combo.mapToGlobal(QPoint(0, self.combo.height() + 4))
+        screen = self.combo.screen() or QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            if position.y() + popup.height() > available.bottom():
+                position = self.combo.mapToGlobal(QPoint(0, -popup.height() - 4))
+            if position.x() + popup.width() > available.right():
+                position.setX(max(available.left(), available.right() - popup.width()))
+            if position.x() < available.left():
+                position.setX(available.left())
+
+        popup.move(position)
+        popup.show()
+
+
 class IconGridDelegate(QStyledItemDelegate):
     def paint(self, painter: Any, option: QStyleOptionViewItem, index: QModelIndex) -> None:
         icon_option = QStyleOptionViewItem(option)
@@ -872,6 +971,9 @@ class MainWindow(QMainWindow):
         combo._icon_popup_filter = icon_popup_filter
 
     def _configure_task_combos(self) -> None:
+        self._configure_task_combo_popup(self.taskCategoryCombo)
+        self._configure_task_combo_popup(self.taskPriorityCombo)
+
         self._centered_task_category_combo_paint_filter = CenteredComboPaintFilter(
             self.taskCategoryCombo,
             center_on_button=True,
@@ -883,6 +985,11 @@ class MainWindow(QMainWindow):
             center_on_button=True,
         )
         self.taskPriorityCombo.installEventFilter(self._centered_task_priority_combo_paint_filter)
+
+    def _configure_task_combo_popup(self, combo: QComboBox) -> None:
+        popup_controller = TaskComboPopupController(combo)
+        combo.installEventFilter(popup_controller)
+        combo._task_combo_popup_controller = popup_controller
 
     def _fill_icon_combo(self, combo: QComboBox) -> None:
         combo.clear()
@@ -2470,6 +2577,23 @@ QComboBox#taskPriorityCombo QAbstractItemView {
     outline: 0;
     selection-background-color: #eee7df;
     selection-color: #1b1c1a;
+}
+
+QPushButton#taskComboPopupOption {
+    background-color: transparent;
+    color: #1b1c1a;
+    border: none;
+    border-radius: 5px;
+    padding: 0 10px;
+    font-size: 13px;
+    font-weight: 700;
+    text-align: left;
+}
+
+QPushButton#taskComboPopupOption:hover,
+QPushButton#taskComboPopupOption[active="true"] {
+    background-color: #eee7df;
+    color: #1b1c1a;
 }
 
 QListView#categoryIconGridPopup {
