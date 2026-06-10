@@ -80,6 +80,9 @@ ICON_PICKER_ICON_SIZE = 24
 ICON_PICKER_CELL_SIZE = 44
 ICON_PICKER_SPACING = 4
 ICON_PICKER_TOOLTIP_DELAY_MS = 500
+TASK_PRIORITY_POPUP_WIDTH = 170
+TASK_PRIORITY_POPUP_ROW_HEIGHT = 28
+TASK_PRIORITY_POPUP_MARGIN = 4
 PENDING_GROUP_RADIUS = 12
 PENDING_GROUP_RIBBON_WIDTH = 6
 CATEGORY_GRID_MIN_COLUMNS = 1
@@ -576,6 +579,94 @@ class IconGridPopupFilter(QObject):
                 QToolTip.showText(self.viewport.mapToGlobal(self.hover_pos), str(text), self.viewport)
         except RuntimeError:
             self.timer.stop()
+
+
+class TaskPriorityPopup(QFrame):
+    def __init__(
+        self,
+        owner: Any,
+        task_id: str,
+        current_priority: str,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        self.owner = owner
+        self.task_id = task_id
+        self.setObjectName("taskPriorityPopup")
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setFixedWidth(TASK_PRIORITY_POPUP_WIDTH)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(
+            TASK_PRIORITY_POPUP_MARGIN,
+            TASK_PRIORITY_POPUP_MARGIN,
+            TASK_PRIORITY_POPUP_MARGIN,
+            TASK_PRIORITY_POPUP_MARGIN,
+        )
+        layout.setSpacing(0)
+
+        for priority_name in PRIORITIES:
+            option = QPushButton(priority_name)
+            option.setObjectName("taskPriorityPopupOption")
+            option.setProperty("active", priority_name == current_priority)
+            option.setIcon(material_icon("flag", priority_color(priority_name), 14))
+            option.setIconSize(icon_size(14))
+            option.setFixedHeight(TASK_PRIORITY_POPUP_ROW_HEIGHT)
+            option.setCursor(Qt.CursorShape.PointingHandCursor)
+            option.clicked.connect(lambda checked=False, value=priority_name: self.select_priority(value))
+            layout.addWidget(option)
+
+    def select_priority(self, priority: str) -> None:
+        self.close()
+        self.owner.update_task_priority(self.task_id, priority)
+
+    def paintEvent(self, event: Any) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        path = QPainterPath()
+        path.addRoundedRect(rect, 8, 8)
+        painter.fillPath(path, QColor("#fbf9f5"))
+        painter.setPen(QColor("#d1c4b8"))
+        painter.drawPath(path)
+        painter.end()
+
+
+class TaskPriorityButton(QPushButton):
+    def __init__(self, owner: Any, task_id: str, priority: str, parent: QWidget | None = None) -> None:
+        super().__init__(priority, parent)
+        self.owner = owner
+        self.task_id = task_id
+        self.priority = priority
+        self.popup: TaskPriorityPopup | None = None
+        self.setObjectName("taskCardPriorityButton")
+        self.setToolTip("Editar prioridad")
+        self.setIcon(material_icon("flag", priority_color(priority), 14))
+        self.setIconSize(icon_size(14))
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.clicked.connect(self.show_priority_popup)
+
+    def show_priority_popup(self) -> None:
+        if self.popup is not None:
+            self.popup.close()
+
+        popup = TaskPriorityPopup(self.owner, self.task_id, self.priority, self)
+        self.popup = popup
+        popup.destroyed.connect(lambda: setattr(self, "popup", None))
+        popup.adjustSize()
+
+        position = self.mapToGlobal(QPoint(0, self.height() + 4))
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            if position.y() + popup.height() > available.bottom():
+                position = self.mapToGlobal(QPoint(0, -popup.height() - 4))
+            if position.x() + popup.width() > available.right():
+                position.setX(max(available.left(), available.right() - popup.width()))
+
+        popup.move(position)
+        popup.show()
 
 
 class MainWindow(QMainWindow):
@@ -1238,20 +1329,8 @@ class MainWindow(QMainWindow):
         title.setObjectName("taskTitleLabel")
         title.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
 
-        priority = QComboBox()
-        priority.setObjectName("taskCardPriorityCombo")
-        priority.setToolTip("Editar prioridad")
-        priority.setIconSize(icon_size(14))
-        for priority_name in PRIORITIES:
-            priority.addItem(material_icon("flag", priority_color(priority_name), 14), priority_name, priority_name)
         current_priority = str(task.get("priority", DEFAULT_PRIORITY))
-        priority.setCurrentIndex(max(0, priority.findData(current_priority)))
-        priority.currentIndexChanged.connect(
-            lambda index, combo=priority, task_id=task_id: self.update_task_priority(
-                task_id,
-                str(combo.itemData(index) or DEFAULT_PRIORITY),
-            )
-        )
+        priority = TaskPriorityButton(self, task_id, current_priority)
 
         delete_button = QPushButton("")
         delete_button.setObjectName("deleteTaskButton")
@@ -2216,7 +2295,7 @@ QComboBox#taskPriorityCombo {
     padding: 9px 30px 9px 16px;
 }
 
-QComboBox#taskCardPriorityCombo {
+QPushButton#taskCardPriorityButton {
     background-color: #f1eee8;
     color: #4e453c;
     border: none;
@@ -2225,26 +2304,28 @@ QComboBox#taskCardPriorityCombo {
     font-size: 11px;
     font-weight: 800;
     min-width: 92px;
+    text-align: left;
 }
 
-QComboBox#taskCardPriorityCombo:hover {
+QPushButton#taskCardPriorityButton:hover {
     background-color: #e4e2de;
 }
 
-QComboBox#taskCardPriorityCombo::drop-down {
+QPushButton#taskPriorityPopupOption {
+    background-color: transparent;
+    color: #1b1c1a;
     border: none;
-    width: 20px;
+    border-radius: 5px;
+    padding: 0 10px;
+    font-size: 13px;
+    font-weight: 700;
+    text-align: left;
 }
 
-QComboBox#taskCardPriorityCombo QAbstractItemView {
-    background-color: #fbf9f5;
+QPushButton#taskPriorityPopupOption:hover,
+QPushButton#taskPriorityPopupOption[active="true"] {
+    background-color: #eee7df;
     color: #1b1c1a;
-    border: 1px solid #d1c4b8;
-    border-radius: 8px;
-    padding: 4px;
-    outline: 0;
-    selection-background-color: #eee7df;
-    selection-color: #1b1c1a;
 }
 
 QComboBox#taskCategoryCombo:hover,
