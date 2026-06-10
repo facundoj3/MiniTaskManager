@@ -5,6 +5,7 @@ import unittest
 from models import (
     normalize_completed_category_order,
     ordered_group_ids,
+    reorder_pending_tasks_within_category_at_index,
     reorder_pending_tasks_within_category,
     reorder_records_by_id,
 )
@@ -48,6 +49,67 @@ class ReorderingTests(unittest.TestCase):
             [task["id"] for task in reordered],
             ["done-1", "task-3", "other-1", "task-1", "task-2"],
         )
+
+    def test_reorder_pending_tasks_within_category_at_index_moves_down_one_slot(self) -> None:
+        tasks = [
+            {"id": "task-1", "categoryId": "cat-1", "completed": False},
+            {"id": "task-2", "categoryId": "cat-1", "completed": False},
+            {"id": "task-3", "categoryId": "cat-1", "completed": False},
+        ]
+
+        reordered = reorder_pending_tasks_within_category_at_index(tasks, "cat-1", "task-1", 1)
+
+        self.assertEqual([task["id"] for task in reordered], ["task-2", "task-1", "task-3"])
+
+    def test_reorder_pending_tasks_within_category_at_index_moves_to_end(self) -> None:
+        tasks = [
+            {"id": "task-1", "categoryId": "cat-1", "completed": False},
+            {"id": "task-2", "categoryId": "cat-1", "completed": False},
+            {"id": "task-3", "categoryId": "cat-1", "completed": False},
+        ]
+
+        reordered = reorder_pending_tasks_within_category_at_index(tasks, "cat-1", "task-1", 2)
+
+        self.assertEqual([task["id"] for task in reordered], ["task-2", "task-3", "task-1"])
+
+    def test_reorder_pending_tasks_within_category_at_index_moves_up(self) -> None:
+        tasks = [
+            {"id": "task-1", "categoryId": "cat-1", "completed": False},
+            {"id": "task-2", "categoryId": "cat-1", "completed": False},
+            {"id": "task-3", "categoryId": "cat-1", "completed": False},
+        ]
+
+        reordered = reorder_pending_tasks_within_category_at_index(tasks, "cat-1", "task-3", 0)
+
+        self.assertEqual([task["id"] for task in reordered], ["task-3", "task-1", "task-2"])
+
+    def test_reorder_pending_tasks_within_category_at_index_preserves_other_tasks(self) -> None:
+        tasks = [
+            {"id": "done-1", "categoryId": "cat-1", "completed": True},
+            {"id": "task-1", "categoryId": "cat-1", "completed": False},
+            {"id": "other-1", "categoryId": "cat-2", "completed": False},
+            {"id": "task-2", "categoryId": "cat-1", "completed": False},
+            {"id": "task-3", "categoryId": "cat-1", "completed": False},
+        ]
+
+        reordered = reorder_pending_tasks_within_category_at_index(tasks, "cat-1", "task-1", 2)
+
+        self.assertEqual(
+            [task["id"] for task in reordered],
+            ["done-1", "task-2", "other-1", "task-3", "task-1"],
+        )
+
+    def test_reorder_pending_tasks_within_category_at_index_ignores_invalid_input(self) -> None:
+        tasks = [
+            {"id": "task-1", "categoryId": "cat-1", "completed": False},
+            {"id": "task-2", "categoryId": "cat-1", "completed": False},
+        ]
+
+        missing_task = reorder_pending_tasks_within_category_at_index(tasks, "cat-1", "missing", 0)
+        invalid_index = reorder_pending_tasks_within_category_at_index(tasks, "cat-1", "task-1", 2)
+
+        self.assertEqual(missing_task, tasks)
+        self.assertEqual(invalid_index, tasks)
 
 
 if __name__ == "__main__":

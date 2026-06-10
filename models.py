@@ -148,6 +148,40 @@ def reorder_pending_tasks_within_category(
     return result
 
 
+def reorder_pending_tasks_within_category_at_index(
+    tasks: list[TaskRecord],
+    category_id: str,
+    moved_id: str,
+    insertion_index: int,
+) -> list[TaskRecord]:
+    pending_category_tasks = [
+        task
+        for task in tasks
+        if not task.get("completed") and str(task.get("categoryId", "")) == category_id
+    ]
+    moved_index = _index_by_id(pending_category_tasks, moved_id)
+    if moved_index is None:
+        return tasks[:]
+
+    reordered_pending = pending_category_tasks[:]
+    moved = reordered_pending.pop(moved_index)
+    if insertion_index < 0 or insertion_index > len(reordered_pending):
+        return tasks[:]
+
+    reordered_pending.insert(insertion_index, moved)
+    if reordered_pending == pending_category_tasks:
+        return tasks[:]
+
+    reordered_iter = iter(reordered_pending)
+    result: list[TaskRecord] = []
+    for task in tasks:
+        if not task.get("completed") and str(task.get("categoryId", "")) == category_id:
+            result.append(next(reordered_iter))
+        else:
+            result.append(task)
+    return result
+
+
 def ordered_group_ids(
     grouped_ids: list[str],
     categories: list[CategoryRecord],

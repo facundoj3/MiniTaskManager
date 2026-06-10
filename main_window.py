@@ -34,6 +34,7 @@ from PyQt6.QtWidgets import (
     QFrame,
     QGridLayout,
     QHBoxLayout,
+    QLayout,
     QLabel,
     QLineEdit,
     QListView,
@@ -62,6 +63,7 @@ from models import (
     icon_label,
     normalize_completed_category_order,
     ordered_group_ids,
+    reorder_pending_tasks_within_category_at_index,
     reorder_pending_tasks_within_category,
     reorder_records_by_id,
 )
@@ -99,6 +101,7 @@ DRAG_KIND_CATEGORY = "category"
 DRAG_KIND_TASK = "task"
 DRAG_KIND_COMPLETED_CATEGORY = "completed-category"
 DRAG_MIME_PREFIX = "application/x-mini-task-manager-"
+TASK_DRAG_PLACEHOLDER_MIN_HEIGHT = 56
 
 
 def truncated_category_name(name: str) -> str:
@@ -254,11 +257,32 @@ class DragHandle(QLabel):
         if (position - self.drag_start_position).manhattanLength() < QApplication.startDragDistance():
             return
 
-        drag = QDrag(self)
+        owner = self.owner
+        drag = QDrag(owner)
         mime_data = QMimeData()
         mime_data.setData(drag_mime_type(self.drag_kind), encode_drag_payload(self.item_id, self.category_id))
         drag.setMimeData(mime_data)
-        drag.exec(Qt.DropAction.MoveAction)
+        source_card = self._source_drop_frame()
+        if source_card is not None:
+            pixmap = source_card.grab()
+            drag.setPixmap(pixmap)
+            drag.setHotSpot(source_card.mapFromGlobal(self.mapToGlobal(position)))
+
+        if self.drag_kind == DRAG_KIND_TASK:
+            owner.begin_task_drag(self.item_id, self.category_id, source_card)
+        try:
+            drag.exec(Qt.DropAction.MoveAction)
+        finally:
+            if self.drag_kind == DRAG_KIND_TASK:
+                owner.end_task_drag()
+
+    def _source_drop_frame(self) -> QFrame | None:
+        widget = self.parentWidget()
+        while widget is not None:
+            if isinstance(widget, ReorderDropFrame):
+                return widget
+            widget = widget.parentWidget()
+        return None
 
 
 class ReorderDropFrame(QFrame):
@@ -284,7 +308,9 @@ class ReorderDropFrame(QFrame):
             event.ignore()
 
     def dragMoveEvent(self, event: Any) -> None:
-        if self._can_accept(event):
+        if self.drag_kind == DRAG_KIND_TASK and self._preview_task_drop(event):
+            event.acceptProposedAction()
+        elif self._can_accept(event):
             event.acceptProposedAction()
         else:
             event.ignore()
@@ -296,13 +322,22 @@ class ReorderDropFrame(QFrame):
             return
 
         moved_id, moved_category_id = payload
-        did_move = self.owner.handle_reorder_drop(
-            self.drag_kind,
-            moved_id,
-            moved_category_id,
-            self.target_id,
-            self.target_category_id,
-        )
+        if self.drag_kind == DRAG_KIND_TASK:
+            did_move = self.owner.handle_task_reorder_drop(
+                moved_id,
+                moved_category_id,
+                self.target_id,
+                self.target_category_id,
+                self._drop_after(event),
+            )
+        else:
+            did_move = self.owner.handle_reorder_drop(
+                self.drag_kind,
+                moved_id,
+                moved_category_id,
+                self.target_id,
+                self.target_category_id,
+            )
         if did_move:
             event.acceptProposedAction()
         else:
@@ -320,6 +355,61 @@ class ReorderDropFrame(QFrame):
             self.target_id,
             self.target_category_id,
         )
+
+    def _preview_task_drop(self, event: Any) -> bool:
+        payload = decode_drag_payload(event.mimeData(), DRAG_KIND_TASK)
+        if payload is None:
+            return False
+        moved_id, moved_category_id = payload
+        return self.owner.preview_task_reorder(
+            moved_id,
+            moved_category_id,
+            self.target_id,
+            self.target_category_id,
+            self._drop_after(event),
+        )
+
+    def _drop_after(self, event: Any) -> bool:
+        position = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        return position.y() >= self.height() / 2
+
+
+class TaskDragPlaceholder(QFrame):
+    def __init__(self, owner: Any, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.owner = owner
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event: Any) -> None:
+        if self._can_accept(event):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event: Any) -> None:
+        if self._can_accept(event):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event: Any) -> None:
+        payload = decode_drag_payload(event.mimeData(), DRAG_KIND_TASK)
+        if payload is None:
+            event.ignore()
+            return
+
+        moved_id, moved_category_id = payload
+        if self.owner.handle_task_reorder_preview_drop(moved_id, moved_category_id):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def _can_accept(self, event: Any) -> bool:
+        payload = decode_drag_payload(event.mimeData(), DRAG_KIND_TASK)
+        if payload is None:
+            return False
+        moved_id, moved_category_id = payload
+        return self.owner.can_drop_task_reorder_preview(moved_id, moved_category_id)
 
 
 class CenteredComboPaintFilter(QObject):
@@ -507,6 +597,13 @@ class MainWindow(QMainWindow):
         self.category_list_width = 0
         self.active_category_editor_id: str | None = None
         self.active_category_editor_draft: dict[str, str] | None = None
+        self.dragging_task_id: str | None = None
+        self.dragging_task_category_id: str | None = None
+        self.task_drag_preview_category_id: str | None = None
+        self.task_drag_preview_index: int | None = None
+        self.task_drag_placeholder_height = TASK_DRAG_PLACEHOLDER_MIN_HEIGHT
+        self.task_drag_source_card: QWidget | None = None
+        self.task_drag_placeholder: QFrame | None = None
 
         self._configure_ui()
         self.refresh_all()
@@ -1089,6 +1186,21 @@ class MainWindow(QMainWindow):
 
         return group
 
+    def _task_drag_placeholder(self) -> QFrame:
+        placeholder = TaskDragPlaceholder(self)
+        placeholder.setObjectName("taskDragPlaceholder")
+        placeholder.setFixedHeight(max(TASK_DRAG_PLACEHOLDER_MIN_HEIGHT, self.task_drag_placeholder_height))
+        placeholder.setStyleSheet(
+            """
+            QFrame#taskDragPlaceholder {
+                background-color: rgba(115, 90, 59, 18);
+                border: 1px dashed rgba(115, 90, 59, 95);
+                border-radius: 10px;
+            }
+            """
+        )
+        return placeholder
+
     def _task_card(self, task: TaskRecord, color: str) -> QFrame:
         task_id = str(task.get("id", ""))
         category_id = str(task.get("categoryId", ""))
@@ -1495,6 +1607,299 @@ class MainWindow(QMainWindow):
 
         self._save()
         return True
+
+    def begin_task_drag(self, task_id: str, category_id: str, source_card: QWidget | None) -> None:
+        if self.dragging_task_id is not None:
+            self.clear_task_drag_preview()
+
+        self.dragging_task_id = task_id
+        self.dragging_task_category_id = category_id
+        self.task_drag_preview_category_id = None
+        self.task_drag_preview_index = None
+        if source_card is not None:
+            self.task_drag_placeholder_height = max(
+                TASK_DRAG_PLACEHOLDER_MIN_HEIGHT,
+                source_card.height() or source_card.sizeHint().height(),
+            )
+        else:
+            self.task_drag_placeholder_height = TASK_DRAG_PLACEHOLDER_MIN_HEIGHT
+
+        self.task_drag_source_card = source_card
+        self.task_drag_placeholder = self._task_drag_placeholder()
+        if source_card is not None:
+            layout = self._task_layout_for_widget(source_card)
+            if layout is not None:
+                source_index = layout.indexOf(source_card)
+                if source_index >= 0:
+                    layout.insertWidget(source_index, self.task_drag_placeholder)
+                    source_card.hide()
+
+    def end_task_drag(self) -> None:
+        if self.dragging_task_id is None and self.task_drag_preview_index is None and self.task_drag_source_card is None:
+            return
+        self.clear_task_drag_preview()
+
+    def clear_task_drag_preview(self, *, render: bool = True) -> None:
+        placeholder = self.task_drag_placeholder
+        if placeholder is not None:
+            layout = self._task_layout_for_widget(placeholder)
+            if layout is not None:
+                layout.removeWidget(placeholder)
+            placeholder.deleteLater()
+
+        if self.task_drag_source_card is not None:
+            self.task_drag_source_card.show()
+
+        self.dragging_task_id = None
+        self.dragging_task_category_id = None
+        self.task_drag_preview_category_id = None
+        self.task_drag_preview_index = None
+        self.task_drag_placeholder_height = TASK_DRAG_PLACEHOLDER_MIN_HEIGHT
+        self.task_drag_source_card = None
+        self.task_drag_placeholder = None
+        if render:
+            self.taskGroupsWidget.updateGeometry()
+            self.taskGroupsWidget.update()
+
+    def preview_task_reorder(
+        self,
+        moved_id: str,
+        moved_category_id: str,
+        target_id: str,
+        target_category_id: str,
+        drop_after: bool,
+    ) -> bool:
+        insertion_index = self.task_reorder_insertion_index(
+            moved_id,
+            moved_category_id,
+            target_id,
+            target_category_id,
+            drop_after,
+        )
+        if insertion_index is None:
+            return False
+
+        if (
+            self.task_drag_preview_category_id == moved_category_id
+            and self.task_drag_preview_index == insertion_index
+        ):
+            return True
+
+        self.task_drag_preview_category_id = moved_category_id
+        self.task_drag_preview_index = insertion_index
+        self.move_task_drag_placeholder(target_id, drop_after)
+        return True
+
+    def can_drop_task_reorder_preview(self, moved_id: str, moved_category_id: str) -> bool:
+        return (
+            self.dragging_task_id == moved_id
+            and self.dragging_task_category_id == moved_category_id
+            and self.task_drag_preview_category_id == moved_category_id
+            and self.task_drag_preview_index is not None
+            and self._is_pending_task_in_category(moved_id, moved_category_id)
+        )
+
+    def handle_task_reorder_preview_drop(self, moved_id: str, moved_category_id: str) -> bool:
+        if not self.can_drop_task_reorder_preview(moved_id, moved_category_id):
+            return False
+        return self.apply_task_reorder_at_index(
+            moved_id,
+            moved_category_id,
+            self.task_drag_preview_index,
+        )
+
+    def handle_task_reorder_drop(
+        self,
+        moved_id: str,
+        moved_category_id: str,
+        target_id: str,
+        target_category_id: str,
+        drop_after: bool,
+    ) -> bool:
+        insertion_index = self.task_reorder_insertion_index(
+            moved_id,
+            moved_category_id,
+            target_id,
+            target_category_id,
+            drop_after,
+        )
+        if insertion_index is None:
+            return False
+
+        return self.apply_task_reorder_at_index(moved_id, moved_category_id, insertion_index)
+
+    def apply_task_reorder_at_index(
+        self,
+        moved_id: str,
+        moved_category_id: str,
+        insertion_index: int,
+    ) -> bool:
+        visual_insertion_index = self.task_drag_visual_insertion_index(moved_category_id)
+        if visual_insertion_index is not None:
+            insertion_index = visual_insertion_index
+
+        reordered_tasks = reorder_pending_tasks_within_category_at_index(
+            self.tasks,
+            moved_category_id,
+            moved_id,
+            insertion_index,
+        )
+        if reordered_tasks == self.tasks:
+            self.clear_task_drag_preview(render=False)
+            self.finish_task_reorder_without_refresh()
+            return False
+
+        self.tasks = reordered_tasks
+        if not self.finish_task_reorder_without_refresh():
+            self.clear_task_drag_preview(render=False)
+            self.render_tasks_preserving_pending_scroll()
+        self._save()
+        return True
+
+    def finish_task_reorder_without_refresh(self) -> bool:
+        placeholder = self.task_drag_placeholder
+        source_card = self.task_drag_source_card
+        if placeholder is None or source_card is None:
+            return False
+
+        layout = self._task_layout_for_widget(placeholder)
+        if layout is None:
+            return False
+
+        placeholder_index = layout.indexOf(placeholder)
+        if placeholder_index < 0:
+            return False
+
+        current_source_layout = self._task_layout_for_widget(source_card)
+        source_index = current_source_layout.indexOf(source_card) if current_source_layout is layout else -1
+        insert_index = placeholder_index - 1 if 0 <= source_index < placeholder_index else placeholder_index
+
+        layout.removeWidget(placeholder)
+        placeholder.deleteLater()
+
+        if current_source_layout is not None:
+            current_source_layout.removeWidget(source_card)
+
+        layout.insertWidget(insert_index, source_card)
+        source_card.show()
+
+        self.dragging_task_id = None
+        self.dragging_task_category_id = None
+        self.task_drag_preview_category_id = None
+        self.task_drag_preview_index = None
+        self.task_drag_placeholder_height = TASK_DRAG_PLACEHOLDER_MIN_HEIGHT
+        self.task_drag_source_card = None
+        self.task_drag_placeholder = None
+        self.taskGroupsWidget.updateGeometry()
+        self.taskGroupsWidget.update()
+        return True
+
+    def task_drag_visual_insertion_index(self, category_id: str) -> int | None:
+        placeholder = self.task_drag_placeholder
+        moved_id = self.dragging_task_id
+        if placeholder is None or moved_id is None:
+            return None
+
+        layout = self._task_layout_for_widget(placeholder)
+        if layout is None:
+            return None
+
+        placeholder_index = layout.indexOf(placeholder)
+        if placeholder_index < 0:
+            return None
+
+        insertion_index = 0
+        for index in range(placeholder_index):
+            item = layout.itemAt(index)
+            if item is None:
+                continue
+            widget = item.widget()
+            if not isinstance(widget, ReorderDropFrame):
+                continue
+            if widget.drag_kind != DRAG_KIND_TASK or widget.isHidden():
+                continue
+            if widget.target_category_id != category_id or widget.target_id == moved_id:
+                continue
+            insertion_index += 1
+        return insertion_index
+
+    def render_tasks_preserving_pending_scroll(self) -> None:
+        scrollbar = self.pendingTasksScroll.verticalScrollBar()
+        scroll_value = scrollbar.value()
+        self.pendingTasksScroll.setUpdatesEnabled(False)
+        self.taskGroupsWidget.setUpdatesEnabled(False)
+        try:
+            self.render_tasks()
+        finally:
+            self.taskGroupsWidget.setUpdatesEnabled(True)
+            self.pendingTasksScroll.setUpdatesEnabled(True)
+        QTimer.singleShot(0, lambda: scrollbar.setValue(min(scroll_value, scrollbar.maximum())))
+
+    def move_task_drag_placeholder(self, target_id: str, drop_after: bool) -> None:
+        placeholder = self.task_drag_placeholder
+        if placeholder is None:
+            return
+
+        target_card = self._find_visible_task_card(target_id)
+        if target_card is None:
+            return
+
+        layout = self._task_layout_for_widget(target_card)
+        if layout is None:
+            return
+
+        layout.removeWidget(placeholder)
+        target_index = layout.indexOf(target_card)
+        if target_index < 0:
+            return
+        layout.insertWidget(target_index + (1 if drop_after else 0), placeholder)
+
+    def _find_visible_task_card(self, task_id: str) -> ReorderDropFrame | None:
+        for card in self.findChildren(ReorderDropFrame):
+            if (
+                card.drag_kind == DRAG_KIND_TASK
+                and card.target_id == task_id
+                and not card.isHidden()
+            ):
+                return card
+        return None
+
+    @staticmethod
+    def _task_layout_for_widget(widget: QWidget) -> QLayout | None:
+        parent = widget.parentWidget()
+        if parent is None:
+            return None
+        layout = parent.layout()
+        return layout if isinstance(layout, QVBoxLayout) else None
+
+    def task_reorder_insertion_index(
+        self,
+        moved_id: str,
+        moved_category_id: str,
+        target_id: str,
+        target_category_id: str,
+        drop_after: bool,
+    ) -> int | None:
+        if moved_id == target_id or moved_category_id != target_category_id:
+            return None
+        if not self._is_pending_task_in_category(moved_id, moved_category_id):
+            return None
+        if not self._is_pending_task_in_category(target_id, target_category_id):
+            return None
+
+        visible_tasks = [
+            task
+            for task in self.tasks
+            if (
+                not task.get("completed")
+                and str(task.get("categoryId", "")) == moved_category_id
+                and str(task.get("id", "")) != moved_id
+            )
+        ]
+        for index, task in enumerate(visible_tasks):
+            if str(task.get("id", "")) == target_id:
+                return index + (1 if drop_after else 0)
+        return None
 
     def toggle_pending_group(self, category_id: str) -> None:
         toggle_set_member(self.collapsed_categories, category_id)
