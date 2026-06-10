@@ -4,22 +4,19 @@
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 
 from PyQt6.QtWidgets import QApplication
 
+from app_paths import APP_NAME, AppPaths, application_dir
 from main_window import MainWindow
-
-
-BASE_DIR = Path(__file__).resolve().parent
-DATA_FILE = BASE_DIR / "tasks.json"
 
 
 def main() -> int:
     app = QApplication(sys.argv)
-    app.setApplicationName("Mini Task Manager")
+    app.setApplicationName(APP_NAME)
 
-    window = MainWindow(DATA_FILE)
+    paths = AppPaths(application_dir())
+    window = MainWindow(paths.active_data_file(), paths)
     window.show()
 
     return app.exec()

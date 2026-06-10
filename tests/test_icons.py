@@ -18,6 +18,9 @@ class MaterialIconTests(unittest.TestCase):
     def test_known_icon_path_resolves(self) -> None:
         self.assertEqual(icon_path("menu_book").name, "menu_book.svg")
 
+    def test_data_folder_icon_path_resolves(self) -> None:
+        self.assertEqual(icon_path("folder_open").name, "folder_open.svg")
+
     def test_unknown_icon_falls_back_to_label(self) -> None:
         self.assertEqual(icon_path("missing_icon_name").name, "label.svg")
 

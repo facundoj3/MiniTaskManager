@@ -31,6 +31,7 @@ from PyQt6.QtWidgets import (
     QApplication,
     QColorDialog,
     QComboBox,
+    QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -53,8 +54,10 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from app_paths import TASKS_FILENAME, AppPaths, prepare_data_file
 from models import (
     AVAILABLE_ICONS,
+    DataRecord,
     DEFAULT_PRIORITY,
     PRIORITIES,
     CategoryRecord,
@@ -670,10 +673,11 @@ class TaskPriorityButton(QPushButton):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, data_file: Path | str) -> None:
+    def __init__(self, data_file: Path | str, app_paths: AppPaths | None = None) -> None:
         super().__init__()
         uic.loadUi(UI_FILE, self)
 
+        self.app_paths = app_paths or AppPaths(BASE_DIR)
         self.store = TaskStore(data_file)
         data = self.store.load()
         self.tasks: list[TaskRecord] = data["tasks"]
@@ -705,6 +709,8 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(APP_MIN_WIDTH, APP_MIN_HEIGHT)
         self.setStyleSheet(APP_STYLES)
 
+        self._configure_data_folder_button()
+
         self.dashboardLayout.setStretch(0, 3)
         self.dashboardLayout.setStretch(1, 5)
         self.dashboardLayout.setStretch(2, 4)
@@ -732,6 +738,97 @@ class MainWindow(QMainWindow):
         self.filterWeekButton.clicked.connect(lambda: self.set_stat_filter("semana"))
         self.filterMonthButton.clicked.connect(lambda: self.set_stat_filter("mes"))
         self._update_filter_buttons()
+
+    def _configure_data_folder_button(self) -> None:
+        self.dataFolderButton = QToolButton(self.topBar)
+        self.dataFolderButton.setObjectName("dataFolderButton")
+        self.dataFolderButton.setIcon(material_icon("folder_open", "#735a3b", 18))
+        self.dataFolderButton.setIconSize(icon_size(18))
+        self.dataFolderButton.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.dataFolderButton.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.dataFolderButton.setFixedSize(36, 36)
+        self.dataFolderButton.clicked.connect(self.change_data_folder)
+        self.topBarLayout.addWidget(self.dataFolderButton)
+        self._update_data_folder_button_tooltip()
+
+    def _update_data_folder_button_tooltip(self) -> None:
+        self.dataFolderButton.setToolTip(f"Cambiar carpeta de datos\n{self.store.path.parent}")
+
+    def change_data_folder(self) -> None:
+        selected_dir = QFileDialog.getExistingDirectory(
+            self,
+            "Seleccionar carpeta de datos",
+            str(self.store.path.parent),
+        )
+        if not selected_dir:
+            return
+
+        target_dir = Path(selected_dir)
+        if not target_dir.is_dir():
+            QMessageBox.warning(self, "Carpeta inválida", f"No existe la carpeta:\n{target_dir}")
+            return
+
+        target_data_file = target_dir / TASKS_FILENAME
+        if target_data_file.resolve() == self.store.path.resolve():
+            QMessageBox.information(self, "Carpeta de datos", "La app ya está usando esa carpeta.")
+            return
+
+        old_data_file = self.store.path
+        try:
+            prepared_file = prepare_data_file(target_data_file, self._current_data())
+            self.app_paths.save_custom_data_dir(target_dir)
+        except OSError as exc:
+            QMessageBox.critical(
+                self,
+                "Error cambiando carpeta",
+                f"No se pudo usar la carpeta:\n{target_dir}\n\n{exc}",
+            )
+            return
+
+        self.store = TaskStore(target_data_file)
+        self._replace_data(prepared_file.data)
+        self.refresh_all()
+
+        remove_error: OSError | None = None
+        if prepared_file.created and old_data_file.exists():
+            try:
+                old_data_file.unlink()
+            except OSError as exc:
+                remove_error = exc
+
+        if remove_error is not None:
+            QMessageBox.warning(
+                self,
+                "Carpeta de datos actualizada",
+                f"La app ya usa la nueva carpeta, pero no se pudo eliminar el archivo anterior:\n"
+                f"{old_data_file}\n\n{remove_error}",
+            )
+            return
+
+        QMessageBox.information(self, "Carpeta de datos", "Carpeta de datos actualizada.")
+
+    def _current_data(self) -> DataRecord:
+        return {
+            "tasks": self.tasks,
+            "categories": self.categories,
+            "completedCategoryOrder": self.completed_category_order,
+        }
+
+    def _replace_data(self, data: DataRecord) -> None:
+        self.tasks = data["tasks"]
+        self.categories = data["categories"]
+        self.completed_category_order = data["completedCategoryOrder"]
+        self.collapsed_categories.clear()
+        self.collapsed_completed_categories.clear()
+        self.active_category_editor_id = None
+        self.active_category_editor_draft = None
+        self.dragging_task_id = None
+        self.dragging_task_category_id = None
+        self.task_drag_preview_category_id = None
+        self.task_drag_preview_index = None
+        self.task_drag_source_card = None
+        self.task_drag_placeholder = None
+        self._update_data_folder_button_tooltip()
 
     def _configure_icon_combo(self, combo: QComboBox) -> None:
         view = QListView(combo)
@@ -2186,6 +2283,17 @@ QLabel#appTitleLabel {
     color: #735a3b;
     font-size: 24px;
     font-weight: 800;
+}
+
+QToolButton#dataFolderButton {
+    background-color: #eae8e4;
+    border: none;
+    border-radius: 18px;
+    padding: 6px;
+}
+
+QToolButton#dataFolderButton:hover {
+    background-color: #e0d9cf;
 }
 
 QLabel#categoriesTitleLabel,
